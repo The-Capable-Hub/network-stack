@@ -1,0 +1,242 @@
+name: CHERIoT Network-Stack HIL-CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      devcontainer:
+        description: 'Set to override default build container'
+        type: string
+        required: false
+
+jobs:
+  build-examples:
+    name: Build Example Projects
+    runs-on: the-capable-hub-aws-ci
+    container:
+      image: ${{ inputs.devcontainer || 'ghcr.io/cheriot-platform/devcontainer:latest' }}
+      options: --user 1000
+    steps:
+    - name: Checkout repository and submodules
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Check out RTOS
+      run: |
+        cd ..
+        git clone --recurse https://github.com/cheriot-platform/cheriot-rtos
+
+    - name: Build examples for Sonata
+      run: |
+        for d in examples/*/; do (
+          cd $d
+          xmake f --sdk=/cheriot-tools/ --board=sonata-1.3 -m release --IPv6=false
+          xmake run
+        ); done
+
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: sonata-firmware
+        path: examples/*/build/**/firmware.uf2
+        if-no-files-found: error
+
+  hardware-test:
+    name: Hardware Test on Sonata
+    needs: build-examples
+    runs-on: [ the-capable-hub-farm, board:Sonata ]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Download firmware artifacts
+      uses: actions/download-artifact@v7
+      with:
+        name: sonata-firmware
+        path: firmware
+
+    - name: Mount Sonata
+      run: |
+        # Mount the SONATA at a known location
+        sudo mkdir -p /mnt/SONATA
+        sudo mount -o uid=$(id -u),gid=$(id -g),rw -L SONATA /mnt/SONATA
+
+        # Store mount point for all subsequent steps
+        echo "MOUNT_POINT=/mnt/SONATA" >> $GITHUB_ENV
+
+    - name: Make sure the board is not in reset
+      run: sudo usbrelay HURTM_1=0
+
+    - name: Clean existing firmware
+      run: rm -f "$MOUNT_POINT"/*.uf2
+
+    - name: Flash and test 01.SNTP
+      id: sntp
+      continue-on-error: true
+      run: |
+        source /opt/labgrid-env/bin/activate
+        echo "--- Flashing 01.SNTP firmware ---"
+        cp $(find firmware/01.SNTP -name "firmware.uf2") "$MOUNT_POINT/"
+        sync
+        sleep 5
+        echo "--- Resetting board ---"
+        sudo usbrelay HURTM_1=1
+        echo "--- Running SNTP test (timeout: 60s, expecting: 'Current UNIX epoch time:') ---"
+        set +e
+        EXPECTED_STRING="Current UNIX epoch time:" TEST_TIMEOUT=60 sudo -E `which pytest` --lg-env .github/sonata-hil/local.yaml --no-header -q --tb=no --lg-log /tmp/labgrid-log .github/sonata-hil/test_generic.py
+        RESULT=$?
+        set -e
+        echo "--- SNTP test result: $( [ $RESULT -eq 0 ] && echo PASSED || echo FAILED ) ---"
+        echo "--- Serial output ---"
+        sudo find /tmp/labgrid-log -type f -exec cat {} \; || true
+        sudo rm -rf /tmp/labgrid-log
+        echo "--- Cleaning up ---"
+        rm -f "$MOUNT_POINT"/*.uf2
+        # Board MAC can change for different tests so wipe the dhcp lease table after each test
+        sudo systemctl stop dnsmasq
+        sudo rm -f /var/lib/misc/dnsmasq.leases
+        sudo systemctl start dnsmasq
+        exit $RESULT
+
+    - name: Flash and test 02.HTTP
+      id: http
+      continue-on-error: true
+      run: |
+        source /opt/labgrid-env/bin/activate
+        echo "--- Flashing 02.HTTP firmware ---"
+        cp $(find firmware/02.HTTP -name "firmware.uf2") "$MOUNT_POINT/"
+        sync
+        sleep 5
+        echo "--- Resetting board ---"
+        sudo usbrelay HURTM_1=1
+        echo "--- Running HTTP test (timeout: 60s, expecting: 'Learn more') ---"
+        set +e
+        EXPECTED_STRING='<a href="https://iana.org/domains/example">Learn more</a>' TEST_TIMEOUT=60 sudo -E `which pytest` --lg-env .github/sonata-hil/local.yaml --no-header -q --tb=no --lg-log /tmp/labgrid-log .github/sonata-hil/test_generic.py
+        RESULT=$?
+        set -e
+        echo "--- HTTP test result: $( [ $RESULT -eq 0 ] && echo PASSED || echo FAILED ) ---"
+        echo "--- Serial output ---"
+        sudo find /tmp/labgrid-log -type f -exec cat {} \; || true
+        sudo rm -rf /tmp/labgrid-log
+        echo "--- Cleaning up ---"
+        rm -f "$MOUNT_POINT"/*.uf2
+        # Board MAC can change for different tests so wipe the dhcp lease table after each test
+        sudo systemctl stop dnsmasq
+        sudo rm -f /var/lib/misc/dnsmasq.leases
+        sudo systemctl start dnsmasq
+        exit $RESULT
+
+    - name: Flash and test 03.HTTPS
+      id: https
+      continue-on-error: true
+      run: |
+        source /opt/labgrid-env/bin/activate
+        echo "--- Flashing 03.HTTPS firmware ---"
+        cp $(find firmware/03.HTTPS -name "firmware.uf2") "$MOUNT_POINT/"
+        sync
+        sleep 5
+        echo "--- Resetting board ---"
+        sudo usbrelay HURTM_1=1
+        echo "--- Running HTTPS test (timeout: 60s, expecting: 'No content length header found') ---"
+        set +e
+        EXPECTED_STRING="No content length header found" TEST_TIMEOUT=60 sudo -E `which pytest` --lg-env .github/sonata-hil/local.yaml --no-header -q --tb=no --lg-log /tmp/labgrid-log .github/sonata-hil/test_generic.py
+        RESULT=$?
+        set -e
+        echo "--- HTTPS test result: $( [ $RESULT -eq 0 ] && echo PASSED || echo FAILED ) ---"
+        echo "--- Serial output ---"
+        sudo find /tmp/labgrid-log -type f -exec cat {} \; || true
+        sudo rm -rf /tmp/labgrid-log
+        echo "--- Cleaning up ---"
+        rm -f "$MOUNT_POINT"/*.uf2
+        # Board MAC can change for different tests so wipe the dhcp lease table after each test
+        sudo systemctl stop dnsmasq
+        sudo rm -f /var/lib/misc/dnsmasq.leases
+        sudo systemctl start dnsmasq
+        exit $RESULT
+
+    - name: Flash and test 04.MQTT
+      id: mqtt
+      continue-on-error: true
+      run: |
+        source /opt/labgrid-env/bin/activate
+        echo "--- Flashing 04.MQTT firmware ---"
+        cp $(find firmware/04.MQTT -name "firmware.uf2") "$MOUNT_POINT/"
+        sync
+        sleep 5
+        echo "--- Resetting board ---"
+        sudo usbrelay HURTM_1=1
+        echo "--- Running MQTT test (timeout: 60s, expecting: 'Done testing MQTT.') ---"
+        set +e
+        EXPECTED_STRING="Done testing MQTT." TEST_TIMEOUT=60 sudo -E `which pytest` --lg-env .github/sonata-hil/local.yaml --no-header -q --tb=no --lg-log /tmp/labgrid-log .github/sonata-hil/test_generic.py
+        RESULT=$?
+        set -e
+        echo "--- MQTT test result: $( [ $RESULT -eq 0 ] && echo PASSED || echo FAILED ) ---"
+        echo "--- Serial output ---"
+        sudo find /tmp/labgrid-log -type f -exec cat {} \; || true
+        sudo rm -rf /tmp/labgrid-log
+        echo "--- Cleaning up ---"
+        rm -f "$MOUNT_POINT"/*.uf2
+        # Board MAC can change for different tests so wipe the dhcp lease table after each test
+        sudo systemctl stop dnsmasq
+        sudo rm -f /var/lib/misc/dnsmasq.leases
+        sudo systemctl start dnsmasq
+        exit $RESULT
+
+    - name: Flash and test 05.HTTP_SERVER
+      id: http_server
+      continue-on-error: true
+      run: |
+        source /opt/labgrid-env/bin/activate
+        echo "--- Flashing 05.HTTP_SERVER firmware ---"
+        cp $(find firmware/05.HTTP_SERVER -name "firmware.uf2") "$MOUNT_POINT/"
+        sync
+        sleep 5
+        echo "--- Resetting board ---"
+        sudo usbrelay HURTM_1=1
+        echo "--- Running HTTP Server test (timeout: 60s, expecting: 'Listening on port') ---"
+        set +e
+        EXPECTED_STRING="Listening on port" TEST_TIMEOUT=60 sudo -E `which pytest` --lg-env .github/sonata-hil/local.yaml --no-header -q --tb=no --lg-log /tmp/labgrid-log .github/sonata-hil/test_generic.py
+        RESULT=$?
+        set -e
+        echo "--- HTTP Server test result: $( [ $RESULT -eq 0 ] && echo PASSED || echo FAILED ) ---"
+        echo "--- Serial output ---"
+        sudo find /tmp/labgrid-log -type f -exec cat {} \; || true
+        sudo rm -rf /tmp/labgrid-log
+        echo "--- Cleaning up ---"
+        rm -f "$MOUNT_POINT"/*.uf2
+        # Board MAC can change for different tests so wipe the dhcp lease table after each test
+        sudo systemctl stop dnsmasq
+        sudo rm -f /var/lib/misc/dnsmasq.leases
+        sudo systemctl start dnsmasq
+        exit $RESULT
+
+    - name: Fail if any test failed
+      if: always()
+      run: |
+        results=(
+          "sntp:${{ steps.sntp.outcome }}"
+          "http:${{ steps.http.outcome }}"
+          "https:${{ steps.https.outcome }}"
+          "mqtt:${{ steps.mqtt.outcome }}"
+          "http_server:${{ steps.http_server.outcome }}"
+        )
+        failed=0
+        echo "--- Test summary ---"
+        for r in "${results[@]}"; do
+          name="${r%%:*}"
+          outcome="${r##*:}"
+          echo "  $name: $outcome"
+          if [[ "$outcome" == "failure" ]]; then
+            failed=1
+          fi
+        done
+        if [[ $failed -eq 1 ]]; then
+          echo "One or more hardware tests failed."
+          exit 1
+        else
+          echo "All hardware tests passed."
+        fi
