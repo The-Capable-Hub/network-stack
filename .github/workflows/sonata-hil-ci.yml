@@ -1,63 +1,52 @@
 name: CHERIoT Network-Stack HIL-CI
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_run:
+    workflows: ["CHERIoT Network-Stack CI"]
+    types: [completed]
   workflow_dispatch:
     inputs:
-      devcontainer:
-        description: 'Set to override default build container'
+      run-id:
+        description: 'main.yml workflow run ID to download firmware from'
         type: string
-        required: false
+        required: true
 
 jobs:
-  build-examples:
-    name: Build Example Projects
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ inputs.devcontainer || 'ghcr.io/cheriot-platform/devcontainer:latest' }}
-      options: --user 1001
-    steps:
-    - name: Checkout repository and submodules
-      uses: actions/checkout@v6
-      with:
-        submodules: recursive
-
-    - name: Check out RTOS
-      run: |
-        cd ..
-        git clone --recurse https://github.com/cheriot-platform/cheriot-rtos
-
-    - name: Build examples for Sonata
-      run: |
-        for d in examples/*/; do (
-          cd $d
-          xmake f --sdk=/cheriot-tools/ --board=sonata-1.3 -m release --IPv6=false
-          xmake run
-        ); done
-
-    - name: Upload firmware artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: sonata-firmware
-        path: examples/*/build/**/firmware.uf2
-        if-no-files-found: error
-
   hardware-test:
     name: Hardware Test on Sonata
-    needs: build-examples
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: [ the-capable-hub-farm, board:Sonata ]
+    environment: hil-hardware # Requires you to create this environment in settings
+    permissions:
+      statuses: write
+      actions: read
+      contents: read
+    
     steps:
+    - name: Set PR status to pending
+      if: github.event_name == 'workflow_run'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: context.payload.workflow_run.head_sha,
+            state: 'pending',
+            context: 'HIL Tests (Sonata)',
+            description: 'Awaiting hardware testing...'
+          })
+
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v4
 
     - name: Download firmware artifacts
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v4
       with:
         name: sonata-firmware
         path: firmware
+        run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.run-id || github.event.workflow_run.id }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Mount Sonata
       run: |
@@ -76,3 +65,18 @@ jobs:
 
     - name: Flash and test all examples
       run: bash .github/sonata-hil/run-hil-tests.sh
+
+    - name: Update PR status
+      if: always() && github.event_name == 'workflow_run'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+          github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: context.payload.workflow_run.head_sha,
+            state: state,
+            context: 'HIL Tests (Sonata)',
+            description: `Hardware tests finished with status: ${state}`
+          })
