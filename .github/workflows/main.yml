@@ -2,7 +2,6 @@ name: CHERIoT Network-Stack CI
 
 on:
   push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -15,13 +14,13 @@ on:
 jobs:
   check-format:
     name: Check coding conventions
-    runs-on: ubuntu-latest
+    runs-on: the-capable-hub-aws-ci
     container:
       image: ghcr.io/cheriot-platform/devcontainer:latest
-      options: --user 1001
+      options: --user 1000
     steps:
     - name: Checkout repository and submodules
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         submodules: recursive
     - name: Check out RTOS
@@ -34,18 +33,17 @@ jobs:
       strategy:
         matrix:
           build-type: [ debug, release ]
-          board: [ibex-arty-a7-100, sonata-0.2, sonata-1.1]
+          board: [sonata-1.3]
           include:
-            - xmake-run: false
             - build-type: debug
               build-flags: --debug-loader=y --debug-scheduler=y --debug-allocator=information --allocator-rendering=y -m debug
             - build-type: release
               build-flags: --debug-loader=n --debug-scheduler=n --debug-allocator=none -m release --stack-usage-check-allocator=y --stack-usage-check-scheduler=y
         fail-fast: false
-      runs-on: ubuntu-latest
+      runs-on: the-capable-hub-aws-ci
       container:
         image: ${{ inputs.devcontainer || 'ghcr.io/cheriot-platform/devcontainer:latest' }}
-        options: --user 1001
+        options: --user 1000
       steps:
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
@@ -60,11 +58,18 @@ jobs:
           for d in examples/*/; do (
             cd $d
             xmake f --sdk=/cheriot-tools/ --board=${{matrix.board}} ${{ matrix.build-flags }}
-            xmake
+            xmake run
           ); done
+      - name: Upload firmware artifacts
+        if: matrix.board == 'sonata-1.3' && matrix.build-type == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: sonata-firmware
+          path: examples/*/build/**/firmware.uf2
+          if-no-files-found: error
   all-checks:
     needs: [check-format,build-examples]
-    runs-on: ubuntu-latest
+    runs-on: the-capable-hub-aws-ci
     steps:
     - name: Dummy step
       run: true
